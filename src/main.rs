@@ -1,31 +1,9 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
-use std::thread;
 
 use memflow::prelude::v1::*;
 
 const LISTEN_ADDR: &str = "0.0.0.0:8888";
-
-fn init_memflow() -> ConnectorInstance {
-    let inventory = Inventory::scan();
-
-    let args = ConnectorArgs::new().insert("vm_id", "win10");
-
-    inventory
-        .create_connector("kvm", &args)
-        .expect("failed to create kvm connector")
-}
-
-fn read_phys(mem: &mut ConnectorInstance, addr: u64, buf: &mut [u8]) -> Result<(), String> {
-    mem.phys_read_raw_into(Address::from(addr), buf)
-        .map_err(|e| format!("{:?}", e))
-}
-
-fn write_phys(mem: &mut ConnectorInstance, addr: u64, buf: &[u8]) -> Result<(), String> {
-    mem.phys_write_raw(Address::from(addr), buf)
-        .map_err(|e| format!("{:?}", e))
-}
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -53,11 +31,11 @@ impl Packet {
     }
 }
 
-fn handle(mut s: TcpStream, mem: Arc<Mutex<ConnectorInstance>>) {
+fn handle<M: PhysicalMemory>(s: &mut TcpStream, mem: &mut M) {
     let mut hdr = [0u8; 20];
     loop {
         if s.read_exact(&mut hdr).is_err() {
-            break;
+            return;
         }
         let req = Packet::from_bytes(&hdr);
 
@@ -69,11 +47,7 @@ fn handle(mut s: TcpStream, mem: Arc<Mutex<ConnectorInstance>>) {
             1 => {
                 let size = req.cb as usize;
                 let mut data = vec![0u8; size];
-                let result = {
-                    let mut m = mem.lock().unwrap();
-                    read_phys(&mut *m, req.addr, &mut data)
-                };
-                if result.is_err() {
+                if mem.phys_read_raw_into(Address::from(req.addr), &mut data).is_err() {
                     let _ = s.write_all(&Packet { cmd: 1, addr: req.addr, cb: 0 }.to_bytes());
                     continue;
                 }
@@ -84,32 +58,35 @@ fn handle(mut s: TcpStream, mem: Arc<Mutex<ConnectorInstance>>) {
                 let size = req.cb as usize;
                 let mut data = vec![0u8; size];
                 if s.read_exact(&mut data).is_err() {
-                    break;
+                    return;
                 }
-                let ok = {
-                    let mut m = mem.lock().unwrap();
-                    write_phys(&mut *m, req.addr, &data).is_ok()
-                };
+                let ok = mem.phys_write_raw(Address::from(req.addr), &data).is_ok();
                 let _ = s.write_all(&Packet {
                     cmd: 2,
                     addr: req.addr,
                     cb: if ok { size as u64 } else { 0 },
                 }.to_bytes());
             }
-            _ => break,
+            _ => return,
         }
     }
 }
 
 fn main() {
-    let mem = Arc::new(Mutex::new(init_memflow()));
+    let inventory = Inventory::scan();
+
+    let mut connector = inventory
+        .create_connector("kvm", None, None)
+        .expect("failed to create kvm connector");
+
     let listener = TcpListener::bind(LISTEN_ADDR).expect("bind failed");
     println!("rawtcp listening on {}", LISTEN_ADDR);
 
     for stream in listener.incoming() {
-        if let Ok(s) = stream {
-            let m = Arc::clone(&mem);
-            thread::spawn(move || handle(s, m));
+        if let Ok(mut s) = stream {
+            println!("client connected");
+            handle(&mut s, &mut connector);
+            println!("client disconnected");
         }
     }
 }
