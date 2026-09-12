@@ -113,15 +113,3 @@ fn main() {
         }
     }
 }
-注意事项
-ConnectorInstance 类型：如果编译报 cannot find type ConnectorInstance，说明 memflow 0.2 的实际返回类型不叫这个。把报错完整贴给我，我改。
-
-vm_id 参数名：如果报 "unknown arg vm_id"，先试不传参数，把 init_memflow 改成：
-
-rust
-fn init_memflow() -> ConnectorInstance {
-    let inventory = Inventory::scan();
-    inventory
-        .create_connector("kvm", &ConnectorArgs::new())
-        .expect("failed to create kvm connector")
-}
