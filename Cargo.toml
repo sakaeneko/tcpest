@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+memflow = "0.2"
+memflow-kvm = "0.2"
