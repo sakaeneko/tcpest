@@ -1,0 +1,16 @@
+name: Build Rust Server
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - name: Build
+      run: cargo build --release
+    - name: Upload Binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: rawtcp-server
+        path: target/release/tcppest
