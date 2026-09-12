@@ -47,7 +47,8 @@ fn handle<M: PhysicalMemory>(s: &mut TcpStream, mem: &mut M) {
             1 => {
                 let size = req.cb as usize;
                 let mut data = vec![0u8; size];
-                if mem.phys_read_into(Address::from(req.addr), &mut data).is_err() {
+                let addr: PhysicalAddress = Address::from(req.addr).into();
+                if mem.phys_read_into(addr, data.as_mut_slice()).is_err() {
                     let _ = s.write_all(&Packet { cmd: 1, addr: req.addr, cb: 0 }.to_bytes());
                     continue;
                 }
@@ -60,7 +61,8 @@ fn handle<M: PhysicalMemory>(s: &mut TcpStream, mem: &mut M) {
                 if s.read_exact(&mut data).is_err() {
                     return;
                 }
-                let ok = mem.phys_write(Address::from(req.addr), &data).is_ok();
+                let addr: PhysicalAddress = Address::from(req.addr).into();
+                let ok = mem.phys_write(addr, data.as_slice()).is_ok();
                 let _ = s.write_all(&Packet {
                     cmd: 2,
                     addr: req.addr,
