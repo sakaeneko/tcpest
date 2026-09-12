@@ -1,36 +1,31 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::thread;
+
+use memflow::prelude::v1::*;
 
 const LISTEN_ADDR: &str = "0.0.0.0:8888";
 
-// ============================================================
-// 【改动点 1】把你的 memflow 读内存逻辑填进这里
-// 返回值：Ok(()) 表示读取成功，buf 已被填满
-//        Err(...) 表示读取失败
-// ============================================================
-fn read_phys(addr: u64, buf: &mut [u8]) -> Result<(), String> {
-    // 示例：把你已经实现好的读内存函数填这里
-    // 例如：
-    //     my_memflow_reader.read_raw_into(addr, buf)
-    //
-    // 如果读成功，返回 Ok(())
-    // 如果读失败，返回 Err("...".to_string())
+fn init_memflow() -> ConnectorInstance {
+    let inventory = Inventory::scan();
 
-    let _ = addr;
-    let _ = buf;
-    Err("read_phys 还没实现".to_string())
+    let args = ConnectorArgs::new().insert("vm_id", "win10");
+
+    inventory
+        .create_connector("kvm", &args)
+        .expect("failed to create kvm connector")
 }
 
-// ============================================================
-// 【改动点 2】如果你的 memflow 支持写内存，填这里
-// 不支持就直接返回 Err 即可
-// ============================================================
-fn write_phys(_addr: u64, _buf: &[u8]) -> Result<(), String> {
-    Err("write_phys 还没实现".to_string())
+fn read_phys(mem: &mut ConnectorInstance, addr: u64, buf: &mut [u8]) -> Result<(), String> {
+    mem.phys_read_raw_into(Address::from(addr), buf)
+        .map_err(|e| format!("{:?}", e))
 }
 
-// ---------------- 以下是协议实现，不用动 ----------------
+fn write_phys(mem: &mut ConnectorInstance, addr: u64, buf: &[u8]) -> Result<(), String> {
+    mem.phys_write_raw(Address::from(addr), buf)
+        .map_err(|e| format!("{:?}", e))
+}
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -48,6 +43,7 @@ impl Packet {
         b[12..20].copy_from_slice(&self.cb.to_le_bytes());
         b
     }
+
     fn from_bytes(b: &[u8; 20]) -> Self {
         Self {
             cmd: u32::from_le_bytes(b[0..4].try_into().unwrap()),
@@ -57,7 +53,7 @@ impl Packet {
     }
 }
 
-fn handle(mut s: TcpStream) {
+fn handle(mut s: TcpStream, mem: Arc<Mutex<ConnectorInstance>>) {
     let mut hdr = [0u8; 20];
     loop {
         if s.read_exact(&mut hdr).is_err() {
@@ -67,15 +63,17 @@ fn handle(mut s: TcpStream) {
 
         match req.cmd {
             0 => {
-                // STATUS
                 let _ = s.write_all(&Packet { cmd: 0, addr: 0, cb: 1 }.to_bytes());
                 let _ = s.write_all(&[1u8]);
             }
             1 => {
-                // MEM_READ
                 let size = req.cb as usize;
                 let mut data = vec![0u8; size];
-                if read_phys(req.addr, &mut data).is_err() {
+                let result = {
+                    let mut m = mem.lock().unwrap();
+                    read_phys(&mut *m, req.addr, &mut data)
+                };
+                if result.is_err() {
                     let _ = s.write_all(&Packet { cmd: 1, addr: req.addr, cb: 0 }.to_bytes());
                     continue;
                 }
@@ -83,13 +81,15 @@ fn handle(mut s: TcpStream) {
                 let _ = s.write_all(&data);
             }
             2 => {
-                // MEM_WRITE
                 let size = req.cb as usize;
                 let mut data = vec![0u8; size];
                 if s.read_exact(&mut data).is_err() {
                     break;
                 }
-                let ok = write_phys(req.addr, &data).is_ok();
+                let ok = {
+                    let mut m = mem.lock().unwrap();
+                    write_phys(&mut *m, req.addr, &data).is_ok()
+                };
                 let _ = s.write_all(&Packet {
                     cmd: 2,
                     addr: req.addr,
@@ -102,11 +102,26 @@ fn handle(mut s: TcpStream) {
 }
 
 fn main() {
+    let mem = Arc::new(Mutex::new(init_memflow()));
     let listener = TcpListener::bind(LISTEN_ADDR).expect("bind failed");
     println!("rawtcp listening on {}", LISTEN_ADDR);
+
     for stream in listener.incoming() {
         if let Ok(s) = stream {
-            thread::spawn(move || handle(s));
+            let m = Arc::clone(&mem);
+            thread::spawn(move || handle(s, m));
         }
     }
+}
+注意事项
+ConnectorInstance 类型：如果编译报 cannot find type ConnectorInstance，说明 memflow 0.2 的实际返回类型不叫这个。把报错完整贴给我，我改。
+
+vm_id 参数名：如果报 "unknown arg vm_id"，先试不传参数，把 init_memflow 改成：
+
+rust
+fn init_memflow() -> ConnectorInstance {
+    let inventory = Inventory::scan();
+    inventory
+        .create_connector("kvm", &ConnectorArgs::new())
+        .expect("failed to create kvm connector")
 }
